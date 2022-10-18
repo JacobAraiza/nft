@@ -1,5 +1,5 @@
 use borsh::BorshDeserialize;
-use mpl_token_metadata::state::Creator;
+use mpl_token_metadata::state::{Creator, Key};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     instruction::Instruction, program_option::COption, program_pack::Pack, pubkey::Pubkey,
@@ -8,10 +8,7 @@ use solana_sdk::{
 use spl_associated_token_account::{
     get_associated_token_address, instruction::create_associated_token_account_idempotent,
 };
-use spl_token::{
-    instruction::AuthorityType,
-    state::{Account, AccountState, Mint},
-};
+use spl_token::state::{Account, AccountState, Mint};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -21,7 +18,7 @@ fn test() {
     let authority = solana_sdk::signature::read_keypair_file("./authority.keypair").unwrap();
     let user = solana_sdk::signature::read_keypair_file("./user.keypair").unwrap();
 
-    let mint_address = create_mint(&client, &authority, 0).unwrap();
+    let mint_address = dbg!(create_mint(&client, &authority, 0).unwrap());
     let mint = client.get_account(&mint_address).unwrap();
     let mint_data = Mint::unpack(&mint.data).unwrap();
     assert_eq!(mint.owner, spl_token::ID);
@@ -70,7 +67,17 @@ fn test() {
     assert_eq!(metadata_data.mint, mint_address);
     assert!(metadata_data.data.name.starts_with("Mlabs Gold Star"));
 
-    disable_mint(&client, &authority, &mint_address).unwrap();
+    let master_edition_address =
+        create_master_edition(&client, &authority, &mint_address, &metadata_address).unwrap();
+    let master_edition = client.get_account(&master_edition_address).unwrap();
+    let master_edition_data = mpl_token_metadata::state::MasterEditionV2::deserialize(
+        &mut master_edition.data.as_slice(),
+    )
+    .unwrap();
+    assert_eq!(master_edition_data.key, Key::MasterEditionV2);
+    assert_eq!(master_edition_data.max_supply, Some(0));
+    assert_eq!(master_edition_data.supply, 0);
+
     assert!(mint_token(&client, &authority, &mint_address, &account_address, 1).is_err());
 }
 
@@ -128,19 +135,6 @@ fn mint_token(
     Ok(())
 }
 
-fn disable_mint(client: &RpcClient, authority: &Keypair, mint: &Pubkey) -> Result<(), Error> {
-    let instruction = spl_token::instruction::set_authority(
-        &spl_token::ID,
-        mint,
-        None,
-        AuthorityType::MintTokens,
-        &authority.pubkey(),
-        &[&authority.pubkey()],
-    )?;
-    execute(client, authority, &[instruction], [authority])?;
-    Ok(())
-}
-
 struct Metadata {
     name: String,
     uri: String,
@@ -175,12 +169,40 @@ fn create_metadata(
     Ok(metadata_account)
 }
 
-pub fn associated_metaplex_token_address(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
+fn associated_metaplex_token_address(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
     let seeds = [
         mpl_token_metadata::state::PREFIX.as_bytes(),
         wallet.as_ref(),
         mint.as_ref(),
     ];
+    let (account, _) = Pubkey::find_program_address(&seeds, &mpl_token_metadata::id());
+    account
+}
+
+fn create_master_edition(
+    client: &RpcClient,
+    authority: &Keypair,
+    mint: &Pubkey,
+    metadata: &Pubkey,
+) -> Result<Pubkey, Error> {
+    let master_address = associated_metaplex_edition_address(mint, b"edition");
+    let instruction = mpl_token_metadata::instruction::create_master_edition(
+        mpl_token_metadata::id(),
+        master_address,
+        *mint,
+        authority.pubkey(),
+        authority.pubkey(),
+        *metadata,
+        authority.pubkey(),
+        Some(0),
+    );
+    execute(client, authority, &[instruction], [authority])?;
+    Ok(master_address)
+}
+
+fn associated_metaplex_edition_address(mint: &Pubkey, edition: &[u8]) -> Pubkey {
+    let program_id = mpl_token_metadata::id();
+    let seeds = [b"metadata", program_id.as_ref(), mint.as_ref(), edition];
     let (account, _) = Pubkey::find_program_address(&seeds, &mpl_token_metadata::id());
     account
 }
